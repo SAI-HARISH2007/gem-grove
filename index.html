@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Gem Grove — Playable Ad</title>
+<style>
+  :root { --bg1:#2b1055; --bg2:#7597de; --accent:#ffb347; }
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { height:100%; overflow:hidden; font-family:system-ui, "Segoe UI", Arial, sans-serif; }
+  body { background:linear-gradient(160deg, var(--bg1), #4a2f85 55%, var(--bg2)); display:flex; align-items:center; justify-content:center; }
+  #stage { position:relative; width:min(100vw, 62vh, 480px); user-select:none; }
+  #hud { display:flex; justify-content:space-between; align-items:center; padding:10px 6px 8px; color:#fff; }
+  #hud .title { font-weight:800; letter-spacing:.5px; font-size:clamp(15px, 4.2vw, 21px); text-shadow:0 2px 6px rgba(0,0,0,.4); }
+  #hud .moves { background:rgba(255,255,255,.14); border:1px solid rgba(255,255,255,.25); border-radius:999px; padding:4px 13px; font-weight:700; font-size:clamp(13px, 3.6vw, 17px); }
+  #hud .moves b { color:var(--accent); }
+  #goalwrap { margin:0 6px 10px; }
+  #goalbar { height:12px; background:rgba(0,0,0,.35); border-radius:999px; overflow:hidden; }
+  #goalfill { height:100%; width:0%; background:linear-gradient(90deg, #ffd34d, #ff8c42); border-radius:999px; transition:width .25s ease; }
+  #goaltext { color:rgba(255,255,255,.85); font-size:clamp(10px, 2.8vw, 13px); margin-top:4px; text-align:center; font-weight:600; }
+  canvas { display:block; width:100%; border-radius:16px; box-shadow:0 14px 40px rgba(0,0,0,.45); touch-action:none; }
+  #endcard { position:absolute; inset:0; display:none; align-items:center; justify-content:center; flex-direction:column; gap:14px; background:rgba(20,8,45,.82); backdrop-filter:blur(4px); border-radius:16px; text-align:center; padding:24px; animation:fadein .4s ease; }
+  #endcard.show { display:flex; }
+  @keyframes fadein { from { opacity:0; transform:scale(.96);} to { opacity:1; transform:scale(1);} }
+  #endcard h1 { color:#fff; font-size:clamp(24px, 7vw, 38px); text-shadow:0 3px 10px rgba(0,0,0,.5); }
+  #endcard p { color:rgba(255,255,255,.85); font-size:clamp(13px, 3.8vw, 17px); max-width:280px; }
+  #cta { background:linear-gradient(180deg, #ffd34d, #ff8c42); border:none; color:#4a1d00; font-weight:800; font-size:clamp(16px, 5vw, 22px); padding:14px 44px; border-radius:999px; cursor:pointer; box-shadow:0 8px 22px rgba(255,140,66,.45); animation:pulse 1.3s ease-in-out infinite; letter-spacing:.5px; }
+  @keyframes pulse { 0%,100% { transform:scale(1);} 50% { transform:scale(1.07);} }
+  #replay { background:none; border:none; color:rgba(255,255,255,.7); font-size:14px; text-decoration:underline; cursor:pointer; }
+  #hand { position:absolute; font-size:34px; pointer-events:none; display:none; filter:drop-shadow(0 3px 5px rgba(0,0,0,.5)); z-index:5; }
+  #badge { position:absolute; top:-8px; left:50%; transform:translateX(-50%) rotate(-2deg); background:var(--accent); color:#4a1d00; font-size:10px; font-weight:800; letter-spacing:1px; padding:3px 10px; border-radius:4px; text-transform:uppercase; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="badge">Playable ad demo</div>
+  <div id="hud">
+    <div class="title">💎 Gem Grove</div>
+    <div class="moves">Moves: <b id="moves">12</b></div>
+  </div>
+  <div id="goalwrap">
+    <div id="goalbar"><div id="goalfill"></div></div>
+    <div id="goaltext">Score 600 to restore the grove!</div>
+  </div>
+  <canvas id="game"></canvas>
+  <div id="hand">👆</div>
+  <div id="endcard">
+    <h1 id="endtitle">You did it! 🎉</h1>
+    <p id="endmsg">The grove is glowing again. There's plenty more to restore…</p>
+    <button id="cta">PLAY FREE</button>
+    <button id="replay">Replay demo</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+// Gem Grove — a self-contained HTML5 match-3 playable ad. No libraries.
+// Anatomy of a playable: 3-second tutorial hook → one mechanic → win/lose → CTA end card.
+
+const N = 6, GOAL = 600, START_MOVES = 12;
+const COLORS = [
+  { base:'#ff5d6c', dark:'#b92b3c', light:'#ffb3bb' },
+  { base:'#ffc24d', dark:'#c07f12', light:'#ffe6b3' },
+  { base:'#5dd882', dark:'#1f8f49', light:'#bdf2cf' },
+  { base:'#58a6ff', dark:'#1d5fb8', light:'#bcdcff' },
+  { base:'#c77dff', dark:'#7c3ab8', light:'#e6ccff' },
+];
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let CELL = 0, PAD = 0;
+
+let grid = [];          // grid[r][c] = {color, x, y, vy, scale, pop} in pixel coords
+let state = 'idle';     // idle | swap | resolve | ended
+let score = 0, moves = START_MOVES, cascade = 0;
+let sel = null, swapInfo = null;
+let particles = [], floaters = [];
+let interacted = false, handTimer = 0;
+
+function resize() {
+  const w = canvas.clientWidth;
+  canvas.width = canvas.height = Math.round(w * devicePixelRatio);
+  CELL = canvas.width / N;
+  PAD = CELL * 0.07;
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    const g = grid[r] && grid[r][c];
+    if (g) { g.x = c * CELL; g.y = r * CELL; }
+  }
+}
+
+function newGem(r, c, above) {
+  return { color: Math.floor(Math.random() * COLORS.length),
+           x: c * CELL, y: (above ? r - N : r) * CELL, vy: 0, scale: 1, pop: 0 };
+}
+
+function buildBoard() {
+  grid = [];
+  for (let r = 0; r < N; r++) {
+    grid.push([]);
+    for (let c = 0; c < N; c++) {
+      grid[r].push(newGem(r, c, false));
+      // avoid starting matches
+      while (matchAt(r, c)) grid[r][c].color = Math.floor(Math.random() * COLORS.length);
+    }
+  }
+  if (!findValidMove()) buildBoard();
+}
+
+function matchAt(r, c) {
+  const col = grid[r][c].color;
+  if (c >= 2 && grid[r][c-1].color === col && grid[r][c-2].color === col) return true;
+  if (r >= 2 && grid[r-1][c].color === col && grid[r-2][c].color === col) return true;
+  return false;
+}
+
+function findMatches() {
+  const hit = new Set();
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    const col = grid[r][c].color;
+    if (c <= N-3 && grid[r][c+1].color === col && grid[r][c+2].color === col) {
+      let k = c; while (k < N && grid[r][k].color === col) hit.add(r + ',' + k++);
+    }
+    if (r <= N-3 && grid[r+1][c].color === col && grid[r+2][c].color === col) {
+      let k = r; while (k < N && grid[k][c].color === col) hit.add(k++ + ',' + c);
+    }
+  }
+  return hit;
+}
+
+function findValidMove() {
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    for (const [dr, dc] of [[0,1],[1,0]]) {
+      const r2 = r + dr, c2 = c + dc;
+      if (r2 >= N || c2 >= N) continue;
+      swapColors(r, c, r2, c2);
+      const ok = findMatches().size > 0;
+      swapColors(r, c, r2, c2);
+      if (ok) return [r, c, r2, c2];
+    }
+  }
+  return null;
+}
+
+function swapColors(r1, c1, r2, c2) {
+  const t = grid[r1][c1].color;
+  grid[r1][c1].color = grid[r2][c2].color;
+  grid[r2][c2].color = t;
+}
+
+// --- input -------------------------------------------------------------
+function cellAt(e) {
+  const rect = canvas.getBoundingClientRect();
+  const p = e.touches ? e.touches[0] : e;
+  const x = (p.clientX - rect.left) / rect.width * N;
+  const y = (p.clientY - rect.top) / rect.height * N;
+  const c = Math.floor(x), r = Math.floor(y);
+  return (r >= 0 && r < N && c >= 0 && c < N) ? { r, c, fx: x - c, fy: y - r } : null;
+}
+
+let dragFrom = null;
+function onDown(e) {
+  if (state !== 'idle') return;
+  interacted = true; hideHand();
+  dragFrom = cellAt(e);
+  if (e.cancelable) e.preventDefault();
+}
+function onMove(e) {
+  if (state !== 'idle' || !dragFrom) return;
+  const cur = cellAt(e);
+  if (!cur) return;
+  const dr = cur.r - dragFrom.r, dc = cur.c - dragFrom.c;
+  if (Math.abs(dr) + Math.abs(dc) === 1) { trySwap(dragFrom.r, dragFrom.c, cur.r, cur.c); dragFrom = null; }
+  if (e.cancelable) e.preventDefault();
+}
+function onUp(e) {
+  if (state !== 'idle' || !dragFrom) { dragFrom = null; return; }
+  const cur = dragFrom; dragFrom = null;
+  if (sel && Math.abs(sel.r - cur.r) + Math.abs(sel.c - cur.c) === 1) { trySwap(sel.r, sel.c, cur.r, cur.c); sel = null; }
+  else sel = (sel && sel.r === cur.r && sel.c === cur.c) ? null : { r: cur.r, c: cur.c };
+}
+canvas.addEventListener('mousedown', onDown);
+canvas.addEventListener('mousemove', onMove);
+canvas.addEventListener('mouseup', onUp);
+canvas.addEventListener('touchstart', onDown, { passive: false });
+canvas.addEventListener('touchmove', onMove, { passive: false });
+canvas.addEventListener('touchend', onUp);
+
+function trySwap(r1, c1, r2, c2) {
+  state = 'swap';
+  swapInfo = { r1, c1, r2, c2, t: 0, back: false };
+}
+
+// --- resolution --------------------------------------------------------
+function resolveBoard() {
+  const hit = findMatches();
+  if (hit.size === 0) {
+    cascade = 0;
+    if (score >= GOAL) return endGame(true);
+    if (moves <= 0) return endGame(false);
+    if (!findValidMove()) buildBoard();   // reshuffle dead boards
+    state = 'idle';
+    return;
+  }
+  cascade++;
+  const gain = hit.size * 20 * cascade;
+  score += gain;
+  updateHud();
+  let cx = 0, cy = 0;
+  hit.forEach(key => {
+    const [r, c] = key.split(',').map(Number);
+    const g = grid[r][c];
+    g.pop = 1;
+    cx += g.x + CELL/2; cy += g.y + CELL/2;
+    spawnBurst(g.x + CELL/2, g.y + CELL/2, g.color);
+  });
+  floaters.push({ x: cx / hit.size, y: cy / hit.size, text: '+' + gain, life: 1,
+                  big: cascade > 1 ? 'x' + cascade + '!' : null });
+  state = 'resolve';
+  setTimeout(() => { collapse(hit); }, 180);
+}
+
+function collapse(hit) {
+  for (let c = 0; c < N; c++) {
+    let write = N - 1;
+    for (let r = N - 1; r >= 0; r--) {
+      if (!hit.has(r + ',' + c)) {
+        if (write !== r) { grid[write][c] = grid[r][c]; }
+        write--;
+      }
+    }
+    for (let r = write; r >= 0; r--) grid[r][c] = newGem(r, c, true);
+  }
+  // let gravity animation play, then look for cascades
+  state = 'fall';
+}
+
+function endGame(won) {
+  state = 'ended';
+  document.getElementById('endtitle').textContent = won ? 'You did it! 🎉' : 'So close!';
+  document.getElementById('endmsg').textContent = won
+    ? 'The grove is glowing again. There\'s plenty more to restore…'
+    : 'The grove still needs you. One more try?';
+  document.getElementById('endcard').classList.add('show');
+  if (won) for (let i = 0; i < 80; i++)
+    spawnBurst(Math.random() * canvas.width, Math.random() * canvas.height * .5,
+               Math.floor(Math.random() * COLORS.length));
+}
+
+document.getElementById('cta').addEventListener('click', () => {
+  // In a live campaign this is the store link; the demo explains itself.
+  alert('In a real campaign this button opens the App Store / Play Store listing.');
+});
+document.getElementById('replay').addEventListener('click', () => {
+  score = 0; moves = START_MOVES; cascade = 0; sel = null;
+  document.getElementById('endcard').classList.remove('show');
+  buildBoard(); resize(); updateHud(); state = 'idle';
+});
+
+function updateHud() {
+  document.getElementById('moves').textContent = moves;
+  document.getElementById('goalfill').style.width = Math.min(100, score / GOAL * 100) + '%';
+  document.getElementById('goaltext').textContent =
+    score >= GOAL ? 'Grove restored!' : `Score ${GOAL} to restore the grove — ${score} so far`;
+}
+
+// --- effects -----------------------------------------------------------
+function spawnBurst(x, y, color) {
+  for (let i = 0; i < 7; i++) {
+    const a = Math.random() * Math.PI * 2, s = CELL * (0.04 + Math.random() * 0.1);
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - CELL * 0.05,
+                     life: 1, color, r: CELL * (0.04 + Math.random() * 0.06) });
+  }
+}
+
+// --- tutorial hand -----------------------------------------------------
+const handEl = document.getElementById('hand');
+let handMove = null;
+function showHand() {
+  handMove = findValidMove();
+  if (!handMove) return;
+  handEl.style.display = 'block';
+  handTimer = 0;
+}
+function hideHand() { handEl.style.display = 'none'; handMove = null; }
+function animateHand(dt) {
+  if (!handMove || interacted) return;
+  handTimer += dt;
+  const [r1, c1, r2, c2] = handMove;
+  const t = (Math.sin(handTimer * 2.5) + 1) / 2;   // ping-pong between the two cells
+  const rect = canvas.getBoundingClientRect();
+  const stage = document.getElementById('stage').getBoundingClientRect();
+  const x = ((c1 + (c2 - c1) * t + 0.5) / N) * rect.width + (rect.left - stage.left);
+  const y = ((r1 + (r2 - r1) * t + 0.55) / N) * rect.height + (rect.top - stage.top);
+  handEl.style.left = (x - 10) + 'px';
+  handEl.style.top = y + 'px';
+}
+
+// --- render loop -------------------------------------------------------
+function drawGem(g, r, c) {
+  const cx = g.x + CELL/2, cy = g.y + CELL/2;
+  const col = COLORS[g.color];
+  let sc = g.scale;
+  if (g.pop > 0) { sc = g.scale * (1 + g.pop * 0.25); ctx.globalAlpha = 1 - g.pop; }
+  if (sel && sel.r === r && sel.c === c) sc *= 1.12;
+  const rad = (CELL/2 - PAD) * sc;
+  const grad = ctx.createRadialGradient(cx - rad*0.35, cy - rad*0.4, rad*0.1, cx, cy, rad);
+  grad.addColorStop(0, col.light);
+  grad.addColorStop(0.55, col.base);
+  grad.addColorStop(1, col.dark);
+  ctx.beginPath();
+  ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.beginPath();                                   // specular highlight
+  ctx.ellipse(cx - rad*0.3, cy - rad*0.42, rad*0.28, rad*0.16, -0.5, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(255,255,255,.55)';
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // board backdrop
+  ctx.fillStyle = 'rgba(0,0,0,.28)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    if ((r + c) % 2 === 0) { ctx.fillStyle = 'rgba(255,255,255,.045)'; ctx.fillRect(c*CELL, r*CELL, CELL, CELL); }
+  }
+
+  // swap animation
+  if (state === 'swap' && swapInfo) {
+    const s = swapInfo; s.t += dt * 7;
+    const a = grid[s.r1][s.c1], b = grid[s.r2][s.c2];
+    const t = Math.min(1, s.t), e = t * t * (3 - 2 * t);
+    a.x = (s.c1 + (s.c2 - s.c1) * e) * CELL; a.y = (s.r1 + (s.r2 - s.r1) * e) * CELL;
+    b.x = (s.c2 + (s.c1 - s.c2) * e) * CELL; b.y = (s.r2 + (s.r1 - s.r2) * e) * CELL;
+    if (t >= 1) {
+      swapColors(s.r1, s.c1, s.r2, s.c2);
+      a.x = s.c1 * CELL; a.y = s.r1 * CELL; b.x = s.c2 * CELL; b.y = s.r2 * CELL;
+      if (s.back) { swapInfo = null; state = 'idle'; }
+      else if (findMatches().size > 0) { moves--; updateHud(); swapInfo = null; resolveBoard(); }
+      else { swapInfo = { r1: s.r1, c1: s.c1, r2: s.r2, c2: s.c2, t: 0, back: true }; }
+    }
+  }
+
+  // pop animation
+  if (state === 'resolve') {
+    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++)
+      if (grid[r][c].pop > 0) grid[r][c].pop = Math.min(1, grid[r][c].pop + dt * 5);
+  }
+
+  // gravity
+  if (state === 'fall') {
+    let settled = true;
+    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+      const g = grid[r][c], ty = r * CELL;
+      g.pop = 0; g.x = c * CELL;
+      if (Math.abs(g.y - ty) > 1) {
+        settled = false;
+        g.vy += CELL * 14 * dt;
+        g.y = Math.min(ty, g.y + g.vy);
+      } else { g.y = ty; g.vy = 0; }
+    }
+    if (settled) resolveBoard();
+  }
+
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) drawGem(grid[r][c], r, c);
+
+  // particles
+  particles = particles.filter(p => p.life > 0);
+  for (const p of particles) {
+    p.life -= dt * 1.6; p.x += p.vx; p.y += p.vy; p.vy += CELL * 0.6 * dt;
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = COLORS[p.color].base;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // floating score text
+  floaters = floaters.filter(f => f.life > 0);
+  for (const f of floaters) {
+    f.life -= dt * 0.9; f.y -= CELL * 0.5 * dt;
+    ctx.globalAlpha = Math.max(0, f.life);
+    ctx.fillStyle = '#fff';
+    ctx.font = `800 ${CELL*0.42}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = 8;
+    ctx.fillText(f.text, f.x, f.y);
+    if (f.big) { ctx.fillStyle = '#ffd34d'; ctx.fillText(f.big, f.x, f.y - CELL*0.5); }
+    ctx.shadowBlur = 0;
+  }
+  ctx.globalAlpha = 1;
+
+  animateHand(dt);
+  requestAnimationFrame(frame);
+}
+
+// --- boot --------------------------------------------------------------
+buildBoard();
+resize();
+updateHud();
+window.addEventListener('resize', resize);
+setTimeout(showHand, 600);          // the 3-second hook: show the hint almost immediately
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
