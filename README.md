@@ -21,3 +21,7 @@ Built as a portfolio piece demonstrating the anatomy of a playable:
 Built in one evening with Claude Code, by Sai Haresh Anand S. All rendering and game
 logic is hand-rolled Canvas 2D; the gem art is procedural (gradients), so the file has
 zero asset dependencies.
+
+Companion playables: [Pin Rescue](https://github.com/SAI-HARISH2007/pin-rescue)
+(pull-the-pin physics) and [Sky Stack](https://github.com/SAI-HARISH2007/sky-stack)
+(tap-timing stacker).
